@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>School Chess Championship</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="shell masthead-inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">♞</span> School Chess Championship</a>
+      <details class="rules">
+        <summary>Tournament rules</summary>
+        <div class="rules-sheet">
+          <h2>Tournament rules</h2>
+          <p>Each group plays four Swiss-style rounds. Round 1 is a random draw. Later pairings favor similar scores and balanced colors while avoiding repeat opponents where possible.</p>
+          <p>A win earns 1 point, a draw ½, and a loss 0. A bye earns 1 point and adds no opponent to the tie-breaks.</p>
+          <dl>
+            <dt>Buchholz</dt><dd>Sum of opponents’ scores, including any points they earned from byes.</dd>
+            <dt>Sonneborn–Berger</dt><dd>Sum of defeated opponents’ scores and half of drawn opponents’ scores.</dd>
+            <dt>Wins</dt><dd>Count of games won. Bye points contribute to the score only.</dd>
+          </dl>
+          <p>If all three tie-breaks leave first place tied, record the group playoff winner. The two group winners meet in the championship final.</p>
+        </div>
+      </details>
+    </div>
+  </header>
+  <main class="shell">
+    <nav id="navigation" class="navigation" aria-label="Tournament sections"></nav>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <div id="dashboard"><p>Loading tournament…</p></div>
+  </main>
+</body>
+</html>
