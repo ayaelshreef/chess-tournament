@@ -8,57 +8,141 @@ export const newTournament = () => ({
   final: null,
 });
 
-const results = ['white', 'draw', 'black'];
+const results = ['white', 'draw', 'black', 'white-forfeit', 'black-forfeit', 'double-forfeit'];
+const byeResults = ['bye', 'half-bye', 'zero-bye'];
 const complete = round => round.matches.every(match => match.result !== null);
 const pairKey = (a, b) => a < b ? a + ':' + b : b + ':' + a;
-const compare = (a, b) => b.points - a.points || b.buchholz - a.buchholz ||
-  b.sonnebornBerger - a.sonnebornBerger || b.wins - a.wins;
+const difference = (a, b) => Math.abs(a - b) < 1e-10 ? 0 : a - b;
+const compareRemaining = (a, b) => difference(b.buchholz, a.buchholz) ||
+  difference(b.sonnebornBerger, a.sonnebornBerger);
 
-export function standings(group) {
+// FIDE C.07, effective 1 March 2026, Articles 6, 8, 9 and 16.
+// A null result is pending, never a forfeit or a zero-point bye.
+function roundRecords(group) {
+  const records = new Map(group.players.map(player => [player.id, []]));
+  for (const round of group.rounds) {
+    const assigned = new Set();
+    for (const match of round.matches) {
+      assigned.add(match.white);
+      if (match.black !== null) assigned.add(match.black);
+      if (match.result === null) continue;
+      if (match.black === null) {
+        const points = { bye: 1, 'half-bye': 0.5, 'zero-bye': 0 }[match.result];
+        records.get(match.white).push({ points, opponent: null,
+          kind: match.result === 'bye' ? 'bye' : 'requested' });
+      } else {
+        const scores = { white: [1, 0], draw: [0.5, 0.5], black: [0, 1],
+          'white-forfeit': [1, 0], 'black-forfeit': [0, 1], 'double-forfeit': [0, 0] }[match.result];
+        const played = ['white', 'draw', 'black'].includes(match.result);
+        for (const [id, opponent, points, color] of [
+          [match.white, match.black, scores[0], 'white'],
+          [match.black, match.white, scores[1], 'black'],
+        ]) records.get(id).push({ opponent, points, color,
+          kind: played ? 'played' : points === 1 ? 'forfeit-win' : 'forfeit-loss' });
+      }
+    }
+    // An absent player in stored/imported round data has a zero-point bye.
+    for (const [id, history] of records) {
+      if (!assigned.has(id)) history.push({ opponent: null, points: 0, kind: 'requested' });
+    }
+  }
+  return records;
+}
+
+function scoreBuckets(players, score) {
+  const sorted = [...players].sort((a, b) => difference(score(b), score(a)));
+  const buckets = [];
+  for (const player of sorted) {
+    if (!buckets.length || difference(score(buckets.at(-1)[0]), score(player))) buckets.push([]);
+    buckets.at(-1).push(player);
+  }
+  return buckets;
+}
+
+// DE produces ordered subsets, not a pairwise sorting comparator. A score is
+// meaningful only inside its tied subset; recursive scores form a display path.
+function directEncounter(tied, encounters) {
+  if (tied.length < 2) return [tied];
+  const scores = new Map(tied.map(player => [player.id, 0]));
+  const missing = new Map(tied.map(player => [player.id, 0]));
+  for (let i = 0; i < tied.length; i++) {
+    for (let j = i + 1; j < tied.length; j++) {
+      const a = tied[i].id;
+      const b = tied[j].id;
+      const games = encounters.get(pairKey(a, b));
+      if (!games) {
+        missing.set(a, missing.get(a) + 1);
+        missing.set(b, missing.get(b) + 1);
+      } else {
+        // Repeated encounters contribute their average, per Article 6.1.2.
+        for (const id of [a, b]) scores.set(id, scores.get(id) +
+          games.reduce((sum, game) => sum + game.get(id), 0) / games.length);
+      }
+    }
+  }
+  const recordScores = () => tied.forEach(player => player.directEncounterPath.push(scores.get(player.id)));
+  if ([...missing.values()].every(count => count === 0)) {
+    recordScores();
+    const buckets = scoreBuckets(tied, player => scores.get(player.id));
+    return buckets.length === 1 ? buckets : buckets.flatMap(bucket => directEncounter(bucket, encounters));
+  }
+  // Article 6.3: extract only a leader guaranteed to finish alone first for
+  // EVERY possible result of the missing encounters. Then reapply to the rest.
+  const leader = tied.find(a => tied.every(b => a === b ||
+    difference(scores.get(a.id), scores.get(b.id) + missing.get(b.id)) > 0));
+  if (!leader) return [tied];
+  recordScores();
+  return [[leader], ...directEncounter(tied.filter(player => player !== leader), encounters)];
+}
+
+export function standings(group, totalRounds = 4) {
   const players = new Map(group.players.map(player => [player.id, {
     ...player, points: 0, buchholz: 0, sonnebornBerger: 0, wins: 0, byes: 0, colors: [],
+    directEncounterPath: [],
   }]));
-  const played = group.rounds.flatMap(round => round.matches).filter(match => match.result !== null);
-  for (const match of played) {
-    const white = players.get(match.white);
-    if (match.black === null) {
-      white.points++;
-      white.byes++;
-      continue;
+  const records = roundRecords(group);
+  const adjusted = new Map();
+  const encounters = new Map();
+  for (const [id, history] of records) {
+    const player = players.get(id);
+    player.points = history.reduce((sum, entry) => sum + entry.points, 0);
+    player.byes = history.filter(entry => entry.opponent === null).length;
+    player.wins = history.filter(entry => entry.kind === 'played' && entry.points === 1).length;
+    player.colors = history.filter(entry => entry.kind === 'played').map(entry => entry.color);
+    let adjustedScore = player.points;
+    let laterNonVUR = false;
+    for (const entry of [...history].reverse()) {
+      if (entry.kind === 'requested' && !laterNonVUR) adjustedScore += 0.5 - entry.points;
+      if (!['requested', 'forfeit-loss'].includes(entry.kind)) laterNonVUR = true;
+      if (entry.kind === 'played' && id < entry.opponent) {
+        const key = pairKey(id, entry.opponent);
+        if (!encounters.has(key)) encounters.set(key, []);
+        encounters.get(key).push(new Map([[id, entry.points], [entry.opponent, 1 - entry.points]]));
+      }
     }
-    const black = players.get(match.black);
-    white.colors.push('white');
-    black.colors.push('black');
-    if (match.result === 'draw') {
-      white.points += 0.5;
-      black.points += 0.5;
-    } else {
-      const winner = match.result === 'white' ? white : black;
-      winner.points++;
-      winner.wins++;
+    adjusted.set(id, adjustedScore);
+  }
+  for (const [id, history] of records) {
+    const player = players.get(id);
+    for (const entry of history) {
+      const opponentScore = entry.kind === 'played' ? adjusted.get(entry.opponent) :
+        Math.min(player.points, entry.opponent === null ? totalRounds / 2 : adjusted.get(entry.opponent));
+      player.buchholz += opponentScore;
+      player.sonnebornBerger += opponentScore * entry.points;
     }
   }
-  for (const match of played) {
-    if (match.black === null) continue;
-    const white = players.get(match.white);
-    const black = players.get(match.black);
-    white.buchholz += black.points;
-    black.buchholz += white.points;
-    if (match.result === 'draw') {
-      white.sonnebornBerger += black.points / 2;
-      black.sonnebornBerger += white.points / 2;
-    } else if (match.result === 'white') {
-      white.sonnebornBerger += black.points;
-    } else {
-      black.sonnebornBerger += white.points;
+  const ranked = [];
+  for (const pointsTie of scoreBuckets([...players.values()], player => player.points)) {
+    for (const deTie of directEncounter(pointsTie, encounters)) {
+      deTie.sort((a, b) => compareRemaining(a, b) || a.name.localeCompare(b.name));
+      let rank = ranked.length + 1;
+      for (const [index, player] of deTie.entries()) {
+        if (index && compareRemaining(deTie[index - 1], player)) rank = ranked.length + 1;
+        ranked.push({ ...player, directEncounter: player.directEncounterPath[0] ?? null, rank });
+      }
     }
   }
-  const ranked = [...players.values()].sort((a, b) => compare(a, b) || a.name.localeCompare(b.name));
-  let rank = 0;
-  return ranked.map((player, index) => {
-    if (index === 0 || compare(ranked[index - 1], player)) rank = index + 1;
-    return { ...player, rank };
-  });
+  return ranked;
 }
 
 function colorCost(player, color) {
@@ -219,6 +303,14 @@ export function updateTournament(tournament, action, input) {
   const group = tournament.groups[input.group];
   const latest = group.rounds.at(-1);
   switch (action) {
+    case 'rename-player': {
+      const player = group.players.find(student => student.id === input.player);
+      requireRule(player, 'Student was not found.');
+      const name = typeof input.name === 'string' ? input.name.trim() : '';
+      requireRule(name.length > 0 && name.length <= 80, 'Enter a student name of up to 80 characters.');
+      player.name = name;
+      return;
+    }
     case 'add-player': {
       requireRule(!latest, 'Delete the generated rounds before changing the roster.');
       const name = typeof input.name === 'string' ? input.name.trim() : '';
@@ -242,8 +334,9 @@ export function updateTournament(tournament, action, input) {
       return;
     case 'result': {
       const match = latest?.matches.find(game => game.id === input.match);
-      requireRule(match && match.black !== null, 'Choose a game in the latest round.');
-      requireRule(input.result === null || results.includes(input.result), 'Choose a valid game result.');
+      requireRule(match, 'Choose a game in the latest round.');
+      requireRule(match.black === null ? byeResults.includes(input.result) :
+        input.result === null || results.includes(input.result), 'Choose a valid game result.');
       if (match.result === input.result) return;
       match.result = input.result;
       break;

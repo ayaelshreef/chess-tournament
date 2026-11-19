@@ -12,6 +12,8 @@ Run a single server instance per tournament data file. The server listens on the
 
 Run `npm test` to verify tournament rules, API operations, and persistence.
 
+Standings use Points → Direct Encounter → Buchholz Variable (2026) → Sonneborn–Berger Variable (2026), without cuts. See [tiebreak rules and reference verification](docs/tiebreaks.md) for unplayed-round handling and documented differences from the reference tournament's published numbers.
+
 ## Publish on Cloudflare
 
 Cloudflare Workers hosts the frontend and API. D1 stores the tournament. The browser will prompt for the username `organizer` and the password configured below.

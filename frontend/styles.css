@@ -76,6 +76,7 @@ small, tbody th small { color: inherit; }
 tbody th small, .roster-list small { display: block; color: var(--slate); font-weight: 400; }
 .count { color: var(--slate); font: 600 .8rem "Segoe UI", sans-serif; margin-left: .25rem; }
 form { margin-top: 1rem; display: grid; gap: .55rem; }
+.rename-form { width: 100%; margin-top: 0; }
 form button { justify-self: start; margin-top: .4rem; }
 label { display: block; font-size: .82rem; font-weight: 650; }
 input, select { min-height: 2.25rem; padding: .38rem .48rem; background: var(--white); border: 1px solid #aabeb5; border-radius: .3rem; font-size: .88rem; max-width: 100%; }

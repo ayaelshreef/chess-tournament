@@ -5,6 +5,8 @@ const labels = { A: 'Group A', B: 'Group B', final: 'Championship final' };
 const grades = { A: 'Grades 4–6', B: 'Grades 7–12' };
 const resultChoices = [
   ['', 'Awaiting result'], ['white', '1–0 · White wins'], ['draw', '½–½ · Draw'], ['black', '0–1 · Black wins'],
+  ['white-forfeit', '+–− · White wins by forfeit'], ['black-forfeit', '−–+ · Black wins by forfeit'],
+  ['double-forfeit', '−–− · Both forfeit (0–0)'],
 ];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -14,6 +16,7 @@ let tournament;
 let section = 'A';
 let roundNumber = null;
 let busy = false;
+let editingPlayer = null;
 
 async function load() {
   const response = await fetch('/api/tournament');
@@ -43,14 +46,16 @@ async function action(name, payload = {}) {
     }
     tournament = data;
     registered = name === 'add-player';
+    if (name === 'rename-player') editingPlayer = null;
     if (name === 'generate' || name === 'delete-round') roundNumber = null;
     render();
     notice.textContent = ({
       'add-player': 'Student added.', 'remove-player': 'Student removed.', generate: 'Round generated.',
       result: 'Result saved.', 'delete-round': 'Round deleted.', playoff: 'Playoff result saved.', final: 'Final result saved.',
+      'rename-player': 'Student name saved.',
     })[name];
   } catch (error) {
-    if (name !== 'add-player' || revision !== tournament.revision) render();
+    if (!['add-player', 'rename-player'].includes(name) || revision !== tournament.revision) render();
     notice.textContent = error.message || 'The change could not be saved.';
   } finally {
     busy = false;
@@ -92,8 +97,9 @@ function groupPage(group) {
         ${round && round === latest ? `<button class="link danger" data-delete="${round.number}">Delete round ${round.number}</button>` : ''}
       </section>
       <section class="panel">
-        <div class="panel-head"><div><h2>Standings</h2><p>Points → Buchholz → Sonneborn–Berger → Wins</p></div></div>
+        <div class="panel-head"><div><h2>Standings</h2><p>Points → Direct Encounter → Buchholz → Sonneborn–Berger</p></div></div>
         ${standings(group)}
+        <p class="muted">FIDE 2026 · BH and SB without cuts. DE is applied within tied groups; / shows reapplication to a smaller group, and — means not applicable. Standings are provisional while results are pending.</p>
         ${group.tiedForFirst.length ? `<div class="callout">
           <label for="playoff">Playoff winner</label>
           <p>First place is tied. Hold a playoff and choose its winner here.</p>
@@ -110,7 +116,10 @@ function boards(group, round, latest) {
   const names = new Map(group.players.map(player => [player.id, player.name]));
   return `<div class="board-list">${round.matches.map((match, index) => {
     const white = esc(names.get(match.white));
-    if (match.black === null) return `<div class="board bye"><span class="board-number">Bye</span><strong>${white}</strong><span>1 point</span></div>`;
+    if (match.black === null) return `<div class="board bye"><span class="board-number">Bye</span><strong>${white}</strong>
+      <select id="game-${esc(match.id)}" data-match="${esc(match.id)}" aria-label="Bye result for ${white}" ${round !== latest ? 'disabled' : ''}>${options([
+        ['bye', 'Full-point bye · 1 point'], ['half-bye', 'Requested bye · ½ point'], ['zero-bye', 'Requested bye · 0 points'],
+      ], match.result)}</select></div>`;
     return `<div class="board">
       <span class="board-number">${String(index + 1).padStart(2, '0')}</span>
       <div class="opponents">
@@ -127,12 +136,13 @@ function boards(group, round, latest) {
 function standings(group) {
   if (!group.standings.length) return '<p class="empty">Standings appear as students are registered.</p>';
   return `<div class="table-scroll"><table>
-    <thead><tr><th scope="col">Rank</th><th scope="col">Student</th><th scope="col">Pts</th>
-      <th scope="col"><abbr title="Buchholz">BH</abbr></th><th scope="col"><abbr title="Sonneborn–Berger">SB</abbr></th>
-      <th scope="col">Wins</th><th scope="col">Byes</th></tr></thead>
+    <thead><tr><th scope="col">Rank</th><th scope="col">Student</th><th scope="col">Points</th>
+      <th scope="col"><abbr title="Direct Encounter, reapplied within tied subsets">DE</abbr></th>
+      <th scope="col"><abbr title="Buchholz Variable (2026), Gamepoints, no cuts">BH</abbr></th><th scope="col"><abbr title="Sonneborn–Berger Variable (2026), Gamepoints, no cuts">SB</abbr></th>
+      <th scope="col">Byes</th></tr></thead>
     <tbody>${group.standings.map(p => `<tr>
       <td>${p.rank}</td><th scope="row">${esc(p.name)}${p.className ? `<small>${esc(p.className)}</small>` : ''}</th>
-      <td><strong>${p.points}</strong></td><td>${p.buchholz}</td><td>${p.sonnebornBerger}</td><td>${p.wins}</td><td>${p.byes}</td>
+      <td><strong>${p.points}</strong></td><td>${p.directEncounterPath.length ? p.directEncounterPath.map(value => Number(value.toFixed(3))).join(' / ') : '—'}</td><td>${p.buchholz}</td><td>${p.sonnebornBerger}</td><td>${p.byes}</td>
     </tr>`).join('')}</tbody></table></div>`;
 }
 
@@ -140,7 +150,7 @@ function roster(group) {
   const locked = group.rounds.length > 0;
   return `<section class="panel roster">
     <h2>Student roster <span class="count">${group.players.length}</span></h2>
-    ${locked ? '<p class="muted">Roster locked after round generation.</p>' : `<form id="register">
+    ${locked ? '<p class="muted">You can edit names throughout the tournament.</p>' : `<form id="register">
       <label for="student">Student name</label><input id="student" name="name" maxlength="80" required>
       <div class="form-row"><div><label for="grade">Grade</label><select id="grade" name="grade">
         ${group.grades.map(grade => `<option value="${grade}">Grade ${grade}</option>`).join('')}</select></div>
@@ -148,8 +158,16 @@ function roster(group) {
       <button id="add-student" class="primary">Add student</button>
     </form>`}
     ${group.players.length ? `<ul class="roster-list">${group.players.map(p => `<li>
+      ${editingPlayer === p.id ? `<form class="rename-form" data-rename="${esc(p.id)}">
+        <label for="rename-name">Student name</label>
+        <input id="rename-name" name="name" value="${esc(p.name)}" maxlength="80" required>
+        <div><button class="primary" type="submit">Save name</button>
+          <button class="link" type="button" data-cancel-edit>Cancel</button></div>
+      </form>` : `
       <div><strong>${esc(p.name)}</strong><small>Grade ${p.grade}${p.className ? ' · ' + esc(p.className) : ''}</small></div>
+      <button id="edit-${esc(p.id)}" class="link" data-edit="${esc(p.id)}" aria-label="Edit name for ${esc(p.name)}">Edit</button>
       ${locked ? '' : `<button class="link danger" data-remove="${esc(p.id)}" aria-label="Remove ${esc(p.name)}">Remove</button>`}
+      `}
     </li>`).join('')}</ul>` : ''}
   </section>`;
 }
@@ -181,6 +199,7 @@ navigation.addEventListener('click', event => {
   const button = event.target.closest('[data-section]');
   if (busy || !button) return;
   section = button.dataset.section;
+  editingPlayer = null;
   roundNumber = null;
   notice.textContent = '';
   render();
@@ -188,6 +207,11 @@ navigation.addEventListener('click', event => {
 });
 
 dashboard.addEventListener('submit', event => {
+  if (event.target.dataset.rename) {
+    event.preventDefault();
+    action('rename-player', { player: event.target.dataset.rename, name: new FormData(event.target).get('name') });
+    return;
+  }
   if (event.target.id !== 'register') return;
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
@@ -197,6 +221,18 @@ dashboard.addEventListener('submit', event => {
 dashboard.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button || busy) return;
+  if (button.dataset.edit) {
+    editingPlayer = button.dataset.edit;
+    render();
+    document.getElementById('rename-name').focus();
+    document.getElementById('rename-name').select();
+  }
+  if ('cancelEdit' in button.dataset) {
+    const player = editingPlayer;
+    editingPlayer = null;
+    render();
+    document.getElementById('edit-' + player)?.focus();
+  }
   if (button.dataset.action) action(button.dataset.action);
   if (button.dataset.round) {
     roundNumber = Number(button.dataset.round);

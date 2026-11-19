@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createTournamentServer } from '../backend/server.js';
 import { newTournament, standings, updateTournament } from '../backend/tournament.js';
 
-test('standings count byes in opponent scores and retain quarter-point tie-breaks', () => {
+test('2026 byes use capped dummy scores, retain quarter points and no wins tiebreak', () => {
   const players = ['a', 'b', 'c'].map(id => ({ id, name: id }));
   const rounds = [
     { matches: [{ white: 'a', black: 'b', result: 'draw' }, { white: 'c', black: null, result: 'bye' }] },
     { matches: [{ white: 'a', black: 'c', result: 'white' }, { white: 'b', black: null, result: 'bye' }] },
   ];
-  const score = standings({ players, rounds }).map(p =>
+  const score = standings({ players, rounds }, 2).map(p =>
     [p.id, p.points, p.buchholz, p.sonnebornBerger, p.wins, p.rank]);
-  assert.deepEqual(score, [['a', 1.5, 2.5, 1.75, 1, 1], ['b', 1.5, 1.5, 0.75, 0, 2], ['c', 1, 1.5, 0, 0, 3]]);
+  assert.deepEqual(score, [['a', 1.5, 2.5, 1.75, 1, 1], ['b', 1.5, 2.5, 1.75, 0, 1], ['c', 1, 2.5, 1, 0, 3]]);
 });
 
 test('odd groups rotate byes and avoid repeat opponents', () => {
@@ -46,6 +46,49 @@ test('odd groups rotate byes and avoid repeat opponents', () => {
       assert.equal(participants.size, size);
     }
     assert.equal(byes.size, 4);
+  }
+});
+
+test('API saves forfeit and requested-bye types and restores recalculated standings', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'chess-results-types-'));
+  const file = join(dir, 'tournament.json');
+  const state = newTournament();
+  state.groups.A.players = ['a', 'b', 'c'].map(id => ({ id, name: id, grade: 5 }));
+  state.groups.A.rounds = [{ number: 1, matches: [
+    { id: 'board', white: 'a', black: 'b', result: null },
+    { id: 'bye', white: 'c', black: null, result: 'bye' },
+  ] }];
+  await writeFile(file, JSON.stringify(state));
+  let server;
+  const stop = async () => {
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
+  };
+  try {
+    server = createTournamentServer(file).listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    let current = state;
+    const url = 'http://127.0.0.1:' + server.address().port;
+    for (const [match, result] of [
+      ['board', 'black-forfeit'], ['board', 'double-forfeit'], ['board', 'white-forfeit'],
+      ['bye', 'zero-bye'], ['bye', 'half-bye'],
+    ]) {
+      const response = await fetch(url + '/api/tournament/actions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'result', group: 'A', revision: current.revision, match, result }),
+      });
+      assert.equal(response.status, 200);
+      current = await response.json();
+      const saved = JSON.parse(await readFile(file, 'utf8'));
+      assert.equal(saved.groups.A.rounds[0].matches.find(m => m.id === match).result, result);
+    }
+    await stop();
+    server = createTournamentServer(file).listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const restored = await (await fetch('http://127.0.0.1:' + server.address().port + '/api/tournament')).json();
+    assert.deepEqual(restored, current);
+  } finally {
+    await stop();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -106,6 +149,15 @@ test('runs a 20-student tournament through the API and restores it after restart
     }
     await action('final', { result: 'draw' });
     await action('final', { result: 'A' });
+    const finalist = current.groups.A.finalist;
+    const originalRounds = structuredClone(current.groups.A.rounds);
+    await action('rename-player', { group: 'A', player: finalist.id, name: '  Corrected student name  ' });
+    assert.equal(current.groups.A.finalist.name, 'Corrected student name');
+    assert.equal(current.groups.A.standings.find(p => p.id === finalist.id).name, 'Corrected student name');
+    assert.equal(current.final, 'A');
+    assert.deepEqual(current.groups.A.rounds, originalRounds);
+    await action('rename-player', { group: 'A', player: finalist.id, name: '   ' }, 400);
+    await action('rename-player', { group: 'A', player: 'missing', name: 'Name' }, 400);
     await action('final', { result: 'B', revision: current.revision - 1 }, 409);
     await stop();
     url = await start();
